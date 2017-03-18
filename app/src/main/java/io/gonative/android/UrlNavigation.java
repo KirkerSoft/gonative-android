@@ -2,22 +2,39 @@ package io.gonative.android;
 
 import android.app.Activity;
 import android.content.ActivityNotFoundException;
+import android.content.ComponentName;
 import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.net.Uri;
+import android.net.http.SslError;
 import android.os.Build;
+import android.os.Environment;
+import android.os.Message;
+import android.os.Parcelable;
+import android.provider.MediaStore;
 import android.support.v4.content.LocalBroadcastManager;
 import android.util.Log;
 import android.util.Pair;
 import android.webkit.CookieSyncManager;
 import android.webkit.MimeTypeMap;
+import android.webkit.ValueCallback;
 import android.webkit.WebResourceResponse;
 import android.webkit.WebView;
+import android.widget.Toast;
 
 import org.json.JSONArray;
+import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.io.File;
 import java.net.URL;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Date;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 import io.gonative.android.library.AppConfig;
@@ -26,6 +43,9 @@ public class UrlNavigation {
     public static final String STARTED_LOADING_MESSAGE = "io.gonative.android.webview.started";
     public static final String FINISHED_LOADING_MESSAGE = "io.gonative.android.webview.finished";
     public static final String CLEAR_POOLS_MESSAGE = "io.gonative.android.webview.clearPools";
+
+    // for camera capture
+    public static final String AUTHORITY = BuildConfig.APPLICATION_ID + ".fileprovider";
 
     private static final String TAG = UrlNavigation.class.getName();
 
@@ -154,6 +174,28 @@ public class UrlNavigation {
                 }
             } catch (Exception e) {
                 // do nothing
+            }
+
+            return true;
+        }
+
+        if ("gonative".equals(uri.getScheme()) && "registration".equals(uri.getHost()) &&
+                "/send".equals(uri.getPath())) {
+
+            RegistrationManager registrationManager = ((GoNativeApplication) mainActivity.getApplication()).getRegistrationManager();
+            String customDataString = uri.getQueryParameter("customData");
+            if (customDataString != null) {
+                try {
+                    JSONObject customData = new JSONObject(customDataString);
+                    if (customData != null) {
+                        registrationManager.setCustomData(customData);
+                        registrationManager.sendToAllEndpoints();
+                    }
+                } catch (JSONException e) {
+                    Log.d(TAG, "Gonative registration error: customData is not JSON object");
+                }
+            } else {
+                registrationManager.sendToAllEndpoints();
             }
 
             return true;
@@ -449,7 +491,7 @@ public class UrlNavigation {
         }
     }
 	
-	public void onReceivedError(GoNativeWebviewInterface view, int errorCode, String description, String failingUrl){
+	public void onReceivedError(GoNativeWebviewInterface view, int errorCode){
         mainActivity.runOnUiThread(new Runnable() {
             @Override
             public void run() {
@@ -463,6 +505,27 @@ public class UrlNavigation {
 		}
 	}
 
+    public void onReceivedSslError(SslError error) {
+        int errorMessage;
+        switch (error.getPrimaryError()) {
+            case SslError.SSL_EXPIRED:
+                errorMessage = R.string.ssl_error_expired;
+                break;
+            case SslError.SSL_DATE_INVALID:
+            case SslError.SSL_IDMISMATCH:
+            case SslError.SSL_NOTYETVALID:
+            case SslError.SSL_UNTRUSTED:
+                errorMessage = R.string.ssl_error_cert;
+                break;
+            case SslError.SSL_INVALID:
+            default:
+                errorMessage = R.string.ssl_error_generic;
+                break;
+        }
+
+        Toast.makeText(mainActivity, errorMessage, Toast.LENGTH_LONG).show();
+    }
+
     public String getCurrentWebviewUrl() {
         return currentWebviewUrl;
     }
@@ -473,12 +536,18 @@ public class UrlNavigation {
 
     public WebResourceResponse interceptHtml(LeanWebView view, String url) {
 //        Log.d(TAG, "intercept " + url);
-        return htmlIntercept.interceptHtml(view, url);
+        return htmlIntercept.interceptHtml(view, url, this.currentWebviewUrl);
     }
 
-    public Intent createFileChooserIntent(String[] mimetypespec) {
+    public boolean chooseFileUpload(String[] mimetypespec) {
+        return chooseFileUpload(mimetypespec, false);
+    }
+
+    public boolean chooseFileUpload(String[] mimetypespec, boolean multiple) {
+        mainActivity.setDirectUploadImageUri(null);
+
         boolean isMultipleTypes = false;
-        ArrayList<String> mimeTypes = new ArrayList<String>();
+        Set<String> mimeTypes = new HashSet<String>();
         for (String spec : mimetypespec) {
             String[] splitSpec = spec.split("[,;\\s]");
             for (String s : splitSpec) {
@@ -493,21 +562,118 @@ public class UrlNavigation {
 
         if (mimeTypes.isEmpty()) mimeTypes.add("*/*");
 
-        Intent intent = new Intent();
-        intent.setAction(Intent.ACTION_GET_CONTENT);
-        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        boolean useCamera = false;
+        boolean useVideo = false;
 
-        if (mimeTypes.size() == 1) {
-            intent.setType(mimeTypes.get(0));
-        } else {
-            intent.setType("*/*");
-
-            // If running kitkat or later, then we can specify multiple mime types
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
-                intent.putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes.toArray());
+        if (AppConfig.getInstance(mainActivity).directCameraUploads) {
+            for (String type : mimeTypes) {
+                if (type.equals("*/*")) {
+                    useCamera = true;
+                    useVideo = true;
+                } else if (type.equals("image/*") || type.equals("image/jpeg") || type.equals("image/jpg")) {
+                    useCamera = true;
+                } else if (type.startsWith("video/")) {
+                    useVideo = true;
+                }
             }
         }
 
-        return intent;
+        List<Intent> directCaptureIntents = new ArrayList<>();
+
+        PackageManager packageManger = mainActivity.getPackageManager();
+        if (useCamera) {
+            String timeStamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
+            String imageFileName = "IMG_" + timeStamp + ".jpg";
+            File storageDir = Environment.getExternalStoragePublicDirectory(
+                    Environment.DIRECTORY_PICTURES);
+            File captureFile = new File(storageDir, imageFileName);
+
+            Uri captureUrl = Uri.fromFile(captureFile);
+
+            if (captureUrl != null) {
+                Intent captureIntent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+                List<ResolveInfo> resolveList = packageManger.queryIntentActivities(captureIntent, 0);
+                for (ResolveInfo resolve : resolveList) {
+                    String packageName = resolve.activityInfo.packageName;
+                    Intent intent = new Intent(captureIntent);
+                    intent.setComponent(new ComponentName(resolve.activityInfo.packageName, resolve.activityInfo.name));
+                    intent.setPackage(packageName);
+                    intent.putExtra(MediaStore.EXTRA_OUTPUT, Uri.fromFile(captureFile));
+                    mainActivity.setDirectUploadImageUri(captureUrl);
+                    directCaptureIntents.add(intent);
+                }
+            }
+        }
+
+        if (useVideo) {
+            Intent captureIntent = new Intent(MediaStore.ACTION_VIDEO_CAPTURE);
+            List<ResolveInfo> resolveList = packageManger.queryIntentActivities(captureIntent, 0);
+            for (ResolveInfo resolve : resolveList) {
+                String packageName = resolve.activityInfo.packageName;
+                Intent intent = new Intent(captureIntent);
+                intent.setComponent(new ComponentName(resolve.activityInfo.packageName, resolve.activityInfo.name));
+                intent.setPackage(packageName);
+                directCaptureIntents.add(intent);
+            }
+        }
+
+        Intent documentIntent = new Intent();
+        documentIntent.setAction(Intent.ACTION_GET_CONTENT);
+        documentIntent.addCategory(Intent.CATEGORY_OPENABLE);
+
+        if (mimeTypes.size() == 1) {
+            documentIntent.setType(mimeTypes.iterator().next());
+        } else {
+            documentIntent.setType("*/*");
+
+            // If running kitkat or later, then we can specify multiple mime types
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+                documentIntent.putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes.toArray(new String[mimeTypes.size()]));
+            }
+        }
+
+        // INTENT_ALLOW_MULTIPLE can be used starting API 18. But we should only get multiple=true
+        // starting in Lollipop anyway.
+        if (multiple && Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
+            documentIntent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        }
+
+        Intent intentToSend;
+
+        if (directCaptureIntents.isEmpty()) {
+            intentToSend = documentIntent;
+        } else {
+            Intent chooserIntent = Intent.createChooser(documentIntent, "Choose an action");
+            chooserIntent.putExtra(Intent.EXTRA_INITIAL_INTENTS, directCaptureIntents.toArray(new Parcelable[0]));
+            intentToSend = chooserIntent;
+        }
+
+        try {
+            mainActivity.startActivityForResult(intentToSend, MainActivity.REQUEST_SELECT_FILE);
+            return true;
+        } catch (ActivityNotFoundException e) {
+            mainActivity.cancelFileUpload();
+            Toast.makeText(mainActivity, R.string.cannot_open_file_chooser, Toast.LENGTH_LONG).show();
+            return false;
+        }
+    }
+
+    public boolean createNewWindow(Message resultMsg) {
+        ((GoNativeApplication)mainActivity.getApplication()).setWebviewMessage(resultMsg);
+        return createNewWindow();
+    }
+
+    public boolean createNewWindow(ValueCallback callback) {
+        ((GoNativeApplication) mainActivity.getApplication()).setWebviewValueCallback(callback);
+        return createNewWindow();
+    }
+
+    private boolean createNewWindow() {
+        Intent intent = new Intent(mainActivity.getBaseContext(), MainActivity.class);
+        intent.putExtra("isRoot", false);
+        intent.putExtra(MainActivity.EXTRA_WEBVIEW_WINDOW_OPEN, true);
+        mainActivity.startActivity(intent);
+
+        return true;
     }
 }

@@ -1,11 +1,15 @@
 package io.gonative.android;
 
+import android.Manifest;
 import android.annotation.TargetApi;
 import android.app.Dialog;
 import android.content.BroadcastReceiver;
+import android.content.ClipData;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.pm.ActivityInfo;
+import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.net.ConnectivityManager;
 import android.net.NetworkInfo;
@@ -13,6 +17,8 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
+import android.support.v4.app.ActivityCompat;
+import android.support.v4.content.ContextCompat;
 import android.support.v4.content.LocalBroadcastManager;
 import android.support.v4.view.GravityCompat;
 import android.support.v4.view.ViewCompat;
@@ -30,6 +36,7 @@ import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewParent;
+import android.view.WindowManager;
 import android.webkit.CookieManager;
 import android.webkit.CookieSyncManager;
 import android.webkit.JavascriptInterface;
@@ -41,11 +48,10 @@ import android.widget.ImageView;
 import android.widget.ProgressBar;
 import android.widget.RelativeLayout;
 import android.widget.Spinner;
+import android.widget.Toast;
 
 import com.astuetz.PagerSlidingTabStrip;
 import com.facebook.appevents.AppEventsLogger;
-import com.parse.ParseAnalytics;
-import com.parse.ParsePushBroadcastReceiver;
 
 import org.json.JSONObject;
 import org.json.JSONTokener;
@@ -58,7 +64,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Observable;
 import java.util.Observer;
-import java.util.Random;
 import java.util.Stack;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -70,8 +75,11 @@ public class MainActivity extends ActionBarActivity implements Observer, SwipeRe
     public static final String webviewDatabaseSubdir = "webviewDatabase";
 	private static final String TAG = MainActivity.class.getName();
     public static final String INTENT_TARGET_URL = "targetUrl";
-	public static final int REQUEST_SELECT_FILE_OLD = 100;
-    public static final int REQUEST_SELECT_FILE_LOLLIPOP = 101;
+    public static final String EXTRA_WEBVIEW_WINDOW_OPEN = "io.gonative.android.MainActivity.Extra.WEBVIEW_WINDOW_OPEN";
+	public static final int REQUEST_SELECT_FILE = 100;
+    public static final int REQUEST_PERMISSION_READ_EXTERNAL_STORAGE = 101;
+    public static final int REQUEST_PERMISSION_GEOLOCATION = 102;
+    public static final int REQUEST_PERMISSION_WRITE_EXTERNAL_STORAGE = 103;
     private static final int REQUEST_WEBFORM = 300;
     public static final int REQUEST_WEB_ACTIVITY = 400;
     public static final int REQUEST_PUSH_NOTIFICATION = 500;
@@ -84,6 +92,7 @@ public class MainActivity extends ActionBarActivity implements Observer, SwipeRe
 
 	private ValueCallback<Uri> mUploadMessage;
     private ValueCallback<Uri[]> uploadMessageLP;
+    private Uri directUploadImageUri;
 	private DrawerLayout mDrawerLayout;
 	private View mDrawerView;
 	private ExpandableListView mDrawerList;
@@ -99,7 +108,6 @@ public class MainActivity extends ActionBarActivity implements Observer, SwipeRe
 	private ConnectivityManager cm = null;
     private ProfilePicker profilePicker = null;
     private SegmentedController segmentedController = null;
-    private IdentityService identityService;
     private TabManager tabManager;
     private ActionManager actionManager;
     private boolean isRoot;
@@ -123,17 +131,27 @@ public class MainActivity extends ActionBarActivity implements Observer, SwipeRe
     };
     private FileDownloader fileDownloader = new FileDownloader(this);
     private boolean startedLoading = false; // document readystate checker
-    private PushManager pushManager;
     private RegistrationManager registrationManager;
     private ConnectivityChangeReceiver connectivityReceiver;
     protected String postLoadJavascript;
     protected String postLoadJavascriptForRefresh;
     private Stack<Bundle>previousWebviewStates;
+    private Runnable geolocationPermissionCallback;
 
 
     @Override
 	protected void onCreate(Bundle savedInstanceState) {
         AppConfig appConfig = AppConfig.getInstance(this);
+
+        if (appConfig.forceScreenOrientation == AppConfig.ScreenOrientations.PORTRAIT) {
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+        } else if (appConfig.forceScreenOrientation == AppConfig.ScreenOrientations.LANDSCAPE) {
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+        }
+
+        if (appConfig.keepScreenOn) {
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        }
 
         this.hideWebviewAlpha  = appConfig.hideWebviewAlpha;
 
@@ -143,15 +161,14 @@ public class MainActivity extends ActionBarActivity implements Observer, SwipeRe
         parentUrlLevel = getIntent().getIntExtra("parentUrlLevel", -1);
 
         if (isRoot) {
-            if (appConfig.showSplash) {
-                boolean isFromLauncher = getIntent().hasCategory(Intent.CATEGORY_LAUNCHER);
-                // FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY does not seem to be set when it should
-                // for some devices. I have yet to find a good workaround.
-                boolean isFromRecents = (getIntent().getFlags() & Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0;
+            // Splash screen stuff
+            boolean isFromLauncher = getIntent().hasCategory(Intent.CATEGORY_LAUNCHER);
+            // FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY does not seem to be set when it should
+            // for some devices. I have yet to find a good workaround.
+            boolean isFromRecents = (getIntent().getFlags() & Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0;
 
-                if (isFromLauncher && !isFromRecents) {
-                    showSplashScreen(appConfig.showSplashMaxTime, appConfig.showSplashForceTime);
-                }
+            if (isFromLauncher && !isFromRecents) {
+                showSplashScreen(appConfig.showSplashMaxTime, appConfig.showSplashForceTime);
             }
 
             // html5 app cache (manifest)
@@ -170,25 +187,12 @@ public class MainActivity extends ActionBarActivity implements Observer, SwipeRe
             // Register launch
             configUpdater.registerEvent();
 
-            if (appConfig.parseAnalyticsEnabled) {
-                ParseAnalytics.trackAppOpenedInBackground(getIntent());
-            }
-
             // registration service
             this.registrationManager = ((GoNativeApplication)getApplication()).getRegistrationManager();
-
-            // Push notifications
-            if (appConfig.pushNotifications) {
-                this.pushManager = new PushManager(this);
-                this.pushManager.register();
-            }
         }
 
         // webview pools
         WebViewPool.getInstance().init(this);
-
-        // some global webview setup
-        WebViewSetup.setupWebviewGlobals(this);
 
 		cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
 
@@ -205,7 +209,7 @@ public class MainActivity extends ActionBarActivity implements Observer, SwipeRe
         swipeRefresh.setOnRefreshListener(this);
         // only enable swipeRefresh if LeanWebView is a subclass of WebView, since XWalkView integrates
         // its own refresh controller.
-        if (appConfig.pullToRefresh && WebView.class.isAssignableFrom(LeanWebView.class)) {
+        if (appConfig.pullToRefresh) {
             swipeRefresh.setEnabled(true);
             swipeRefresh.setCanChildScrollUpCallback(new MySwipeRefreshLayout.CanChildScrollUpCallback() {
                 @Override
@@ -272,21 +276,6 @@ public class MainActivity extends ActionBarActivity implements Observer, SwipeRe
         if (targetUrl != null && !targetUrl.isEmpty()){
             url = targetUrl;
         }
-        // if it came from parse, then a bit more work is necessary
-        if (url == null && intent.hasExtra(ParsePushBroadcastReceiver.KEY_PUSH_DATA)) {
-            try {
-                String pushJson = intent.getStringExtra(ParsePushBroadcastReceiver.KEY_PUSH_DATA);
-                JSONObject object = (JSONObject) new JSONTokener(pushJson).nextValue();
-                if (object.has("targetUrl") && !object.isNull("targetUrl")) {
-                    url = object.optString("targetUrl");
-                }
-                if (url == null && object.has("u") && !object.isNull("u")) {
-                    url = object.optString("u");
-                }
-            } catch (Exception e) {
-                Log.e(TAG, "Error parsing json from Parse push notification", e);
-            }
-        }
 
         if (intent.getAction() == Intent.ACTION_VIEW) {
             url = intent.getDataString();
@@ -298,7 +287,21 @@ public class MainActivity extends ActionBarActivity implements Observer, SwipeRe
         if (url == null) url = intent.getStringExtra("url");
 
         if (url != null) {
-            this.mWebview.loadUrl(url);
+            // Crosswalk does not give us callbacks when location is requested.
+            // Ask for it up front, then load the page.
+            if (this.mWebview.isCrosswalk() && appConfig.usesGeolocation) {
+                final String urlLoadAfterLocation = url;
+                this.getRuntimeGeolocationPermission(new Runnable() {
+                    @Override
+                    public void run() {
+                        mWebview.loadUrl(urlLoadAfterLocation);
+                    }
+                });
+            } else {
+                this.mWebview.loadUrl(url);
+            }
+        } else if (intent.getBooleanExtra(EXTRA_WEBVIEW_WINDOW_OPEN, false)){
+            // no worries
         } else {
             Log.e(TAG, "No url specified for MainActivity");
         }
@@ -348,9 +351,6 @@ public class MainActivity extends ActionBarActivity implements Observer, SwipeRe
             mDrawerView.setBackgroundColor(AppConfig.getInstance(this).sidebarBackgroundColor);
         }
 
-        // identity service
-        this.identityService = new IdentityService(this);
-
         // respond to navigation titles processed
         LocalBroadcastManager.getInstance(this).registerReceiver(new BroadcastReceiver() {
             @Override
@@ -399,6 +399,17 @@ public class MainActivity extends ActionBarActivity implements Observer, SwipeRe
 
         if (AppConfig.getInstance(this).facebookEnabled) {
             AppEventsLogger.activateApp(this);
+        }
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+
+        if (isRoot) {
+            if (AppConfig.getInstance(this).clearCache) {
+                this.mWebview.clearCache(true);
+            }
         }
     }
 
@@ -794,25 +805,104 @@ public class MainActivity extends ActionBarActivity implements Observer, SwipeRe
             }
         }
 
-        if (requestCode == REQUEST_SELECT_FILE_OLD) {
-            if (null == mUploadMessage)
+        if (requestCode == REQUEST_SELECT_FILE) {
+            if (resultCode != RESULT_OK) {
+                cancelFileUpload();
                 return;
-
-            if (resultCode == RESULT_OK) {
-                Uri selectedImageUri = data == null ? null : data.getData();
-                mUploadMessage.onReceiveValue(selectedImageUri);
-            } else {
-                mUploadMessage.onReceiveValue(null);
             }
 
+            // from documents (and video camera)
+            if (data != null && data.getData() != null) {
+                if (mUploadMessage != null) {
+                    mUploadMessage.onReceiveValue(data.getData());
+                    mUploadMessage = null;
+                }
+
+                if (uploadMessageLP != null) {
+                    uploadMessageLP.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(resultCode, data));
+                    uploadMessageLP = null;
+                }
+
+                return;
+            }
+
+            // we may get clip data for multi-select documents
+            if (data != null && data.getClipData() != null) {
+                ClipData clipData = data.getClipData();
+                ArrayList<Uri> files = new ArrayList<>(clipData.getItemCount());
+                for (int i = 0; i < clipData.getItemCount(); i++) {
+                    ClipData.Item item = clipData.getItemAt(i);
+                    if (item.getUri() != null) {
+                        files.add(item.getUri());
+                    }
+                }
+
+                if (mUploadMessage != null) {
+                    // shouldn never happen, but just in case, send the first item
+                    if (files.size() > 0) {
+                        mUploadMessage.onReceiveValue(files.get(0));
+                    } else {
+                        mUploadMessage.onReceiveValue(null);
+                    }
+                    mUploadMessage = null;
+                }
+
+                if (uploadMessageLP != null) {
+                    uploadMessageLP.onReceiveValue(files.toArray(new Uri[files.size()]));
+                    uploadMessageLP = null;
+                }
+
+                return;
+            }
+
+            // from camera
+            if (this.directUploadImageUri != null) {
+                // check if we have external storage permissions
+                if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.READ_EXTERNAL_STORAGE) !=
+                        PackageManager.PERMISSION_GRANTED) {
+                    if (ActivityCompat.shouldShowRequestPermissionRationale(this,
+                            android.Manifest.permission.READ_EXTERNAL_STORAGE)) {
+                        Toast.makeText(this, R.string.external_storage_explanation, Toast.LENGTH_LONG).show();
+                    }
+
+                    ActivityCompat.requestPermissions(this,
+                            new String[]{android.Manifest.permission.READ_EXTERNAL_STORAGE},
+                            REQUEST_PERMISSION_READ_EXTERNAL_STORAGE);
+                    // wait for the onRequestPermissionsResult callback
+                    return;
+                }
+
+
+                if (mUploadMessage != null) {
+                    mUploadMessage.onReceiveValue(this.directUploadImageUri);
+                    mUploadMessage = null;
+                }
+                if (uploadMessageLP != null) {
+                    uploadMessageLP.onReceiveValue(new Uri[]{this.directUploadImageUri});
+                    uploadMessageLP = null;
+                }
+                this.directUploadImageUri = null;
+
+                return;
+            }
+
+            // Should not reach here.
+            cancelFileUpload();
+        }
+    }
+
+    public void cancelFileUpload() {
+        if (mUploadMessage != null) {
+            mUploadMessage.onReceiveValue(null);
             mUploadMessage = null;
         }
 
-        if (requestCode == REQUEST_SELECT_FILE_LOLLIPOP) {
-            if (uploadMessageLP == null) return;
-            uploadMessageLP.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(resultCode, data));
+        if (uploadMessageLP != null) {
+            uploadMessageLP.onReceiveValue(null);
             uploadMessageLP = null;
         }
+
+        this.directUploadImageUri = null;
     }
 
     @Override
@@ -1048,10 +1138,6 @@ public class MainActivity extends ActionBarActivity implements Observer, SwipeRe
             this.actionManager.checkActions(url);
         }
 
-        if (this.identityService != null) {
-            this.identityService.checkUrl(url);
-        }
-
         if (this.registrationManager != null) {
             this.registrationManager.checkUrl(url);
         }
@@ -1064,9 +1150,7 @@ public class MainActivity extends ActionBarActivity implements Observer, SwipeRe
         }
 
         AppConfig appConfig = AppConfig.getInstance(this);
-        if (appConfig.sidebarEnabledRegex != null) {
-            setDrawerEnabled(appConfig.sidebarEnabledRegex.matcher(url).matches());
-        }
+        setDrawerEnabled(appConfig.shouldShowSidebarForUrl(url));
     }
 
     public int urlLevelForUrl(String url) {
@@ -1251,20 +1335,52 @@ public class MainActivity extends ActionBarActivity implements Observer, SwipeRe
         decorView.setSystemUiVisibility(visibility);
     }
 
-    public ValueCallback<Uri> getUploadMessage() {
-        return mUploadMessage;
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        if (requestCode == REQUEST_PERMISSION_READ_EXTERNAL_STORAGE) {
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                if (this.directUploadImageUri == null) {
+                    cancelFileUpload();
+                    return;
+                }
+
+                if (mUploadMessage != null) {
+                    mUploadMessage.onReceiveValue(this.directUploadImageUri);
+                    mUploadMessage = null;
+                }
+                if (uploadMessageLP != null) {
+                    uploadMessageLP.onReceiveValue(new Uri[]{this.directUploadImageUri});
+                    uploadMessageLP = null;
+                }
+
+                this.directUploadImageUri = null;
+            } else {
+                cancelFileUpload();
+            }
+        }
+        else if (requestCode == REQUEST_PERMISSION_GEOLOCATION) {
+            // don't care about result
+            if (this.geolocationPermissionCallback != null) {
+                this.geolocationPermissionCallback.run();
+                this.geolocationPermissionCallback = null;
+            }
+        } else if (requestCode == REQUEST_PERMISSION_WRITE_EXTERNAL_STORAGE) {
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                this.fileDownloader.gotExternalStoragePermissions(true);
+            }
+        }
     }
 
     public void setUploadMessage(ValueCallback<Uri> mUploadMessage) {
         this.mUploadMessage = mUploadMessage;
     }
 
-    public ValueCallback<Uri[]> getUploadMessageLP() {
-        return uploadMessageLP;
-    }
-
     public void setUploadMessageLP(ValueCallback<Uri[]> uploadMessageLP) {
         this.uploadMessageLP = uploadMessageLP;
+    }
+
+    public void setDirectUploadImageUri(Uri directUploadImageUri) {
+        this.directUploadImageUri = directUploadImageUri;
     }
 
     public RelativeLayout getFullScreenLayout() {
@@ -1287,6 +1403,44 @@ public class MainActivity extends ActionBarActivity implements Observer, SwipeRe
         @Override
         public void onReceive(Context context, Intent intent) {
             retryFailedPage();
+        }
+    }
+
+    public void getRuntimeGeolocationPermission(final Runnable callback) {
+        int checkFine = ContextCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_FINE_LOCATION);
+        int checkCoarse = ContextCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_COARSE_LOCATION);
+
+        if (checkFine == PackageManager.PERMISSION_GRANTED && checkCoarse == PackageManager.PERMISSION_GRANTED) {
+            if (callback != null) callback.run();
+        }
+
+        if (ActivityCompat.shouldShowRequestPermissionRationale(this, Manifest.permission.ACCESS_FINE_LOCATION) ||
+                ActivityCompat.shouldShowRequestPermissionRationale(this, Manifest.permission.ACCESS_COARSE_LOCATION)) {
+            Toast.makeText(this, R.string.request_permission_explanation_geolocation, Toast.LENGTH_SHORT).show();
+        }
+
+        this.geolocationPermissionCallback = callback;
+        ActivityCompat.requestPermissions(this, new String[]{
+                Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION
+        }, REQUEST_PERMISSION_GEOLOCATION);
+    }
+
+    public void getExternalStorageWritePermission() {
+        // check external storage permission
+        if (ContextCompat.checkSelfPermission(this,
+                Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                != PackageManager.PERMISSION_GRANTED) {
+
+            if (ActivityCompat.shouldShowRequestPermissionRationale(this,
+                    Manifest.permission.WRITE_EXTERNAL_STORAGE)) {
+                Toast.makeText(this, R.string.request_permission_explanation_storage, Toast.LENGTH_LONG).show();
+            }
+
+            ActivityCompat.requestPermissions(this,
+                    new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE},
+                    REQUEST_PERMISSION_WRITE_EXTERNAL_STORAGE);
+        } else {
+            this.fileDownloader.gotExternalStoragePermissions(true);
         }
     }
 }

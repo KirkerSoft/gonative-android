@@ -12,6 +12,7 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
@@ -25,15 +26,14 @@ public class RegistrationManager {
 
     private enum RegistrationDataType {
         Installation,
-        Push,
-        Parse,
-        OneSignal
+        OneSignal,
+        CustomData
     }
 
     private Context context;
-    private String pushRegistrationToken;
-    private String parseInstallationId;
     private String oneSignalUserId;
+    private JSONObject customData;
+    private String lastUrl;
 
     private List<RegistrationEndpoint> registrationEndpoints;
     private EnumSet<RegistrationDataType> allDataTypes;
@@ -86,6 +86,7 @@ public class RegistrationManager {
     }
 
     public void checkUrl(String url) {
+        this.lastUrl = url;
         for (RegistrationEndpoint endpoint : registrationEndpoints) {
             if (LeanUtils.stringMatchesAnyRegex(url, endpoint.urlRegexes)) {
                 endpoint.sendRegistrationInfo();
@@ -93,23 +94,20 @@ public class RegistrationManager {
         }
     }
 
-    public void setPushRegistrationToken(String token) {
-        this.pushRegistrationToken = token;
-        registrationDataChanged(RegistrationDataType.Push);
-    }
-
-    public void setParseInstallationId(String installationId) {
-        this.parseInstallationId = installationId;
-        registrationDataChanged(RegistrationDataType.Parse);
-    }
-
     public void setOneSignalUserId(String oneSignalUserId) {
         this.oneSignalUserId = oneSignalUserId;
         registrationDataChanged(RegistrationDataType.OneSignal);
     }
 
-    public boolean pushEnabled() {
-        return this.allDataTypes.contains(RegistrationDataType.Push);
+    public void setCustomData(JSONObject customData) {
+        this.customData = customData;
+        registrationDataChanged(RegistrationDataType.CustomData);
+    }
+
+    public void sendToAllEndpoints() {
+        for (RegistrationEndpoint endpoint : registrationEndpoints) {
+                endpoint.sendRegistrationInfo();
+        }
     }
 
     private EnumSet<RegistrationDataType> getDataTypesFromString(String s) {
@@ -119,15 +117,11 @@ public class RegistrationManager {
             return dataTypes;
         } else if (s.equalsIgnoreCase("installation")) {
             dataTypes.add(RegistrationDataType.Installation);
-        } else if (s.equalsIgnoreCase("push")) {
-            dataTypes.add(RegistrationDataType.Push);
-            dataTypes.add(RegistrationDataType.Installation);
-        } else if (s.equalsIgnoreCase("parse")) {
-            dataTypes.add(RegistrationDataType.Parse);
-            dataTypes.add(RegistrationDataType.Installation);
+            dataTypes.add(RegistrationDataType.CustomData);
         } else if (s.equalsIgnoreCase("onesignal")) {
             dataTypes.add(RegistrationDataType.OneSignal);
             dataTypes.add(RegistrationDataType.Installation);
+            dataTypes.add(RegistrationDataType.CustomData);
         }
 
         return dataTypes;
@@ -137,7 +131,12 @@ public class RegistrationManager {
         if (!allDataTypes.contains(type)) return;
 
         for (RegistrationEndpoint endpoint : registrationEndpoints) {
-            if (endpoint.dataTypes.contains(type)) endpoint.sendRegistrationInfo();
+            if (!endpoint.dataTypes.contains(type)) continue;
+
+            if (this.lastUrl != null &&
+                    LeanUtils.stringMatchesAnyRegex(this.lastUrl, endpoint.urlRegexes)) {
+                endpoint.sendRegistrationInfo();
+            }
         }
     }
 
@@ -163,16 +162,16 @@ public class RegistrationManager {
                         toSend.putAll(Installation.getInfo(context));
                     }
 
-                    if (dataTypes.contains(RegistrationDataType.Push) && pushRegistrationToken != null) {
-                        toSend.put("deviceToken", pushRegistrationToken);
-                    }
-
-                    if (dataTypes.contains(RegistrationDataType.Parse) && parseInstallationId != null) {
-                        toSend.put("parseInstallationId", parseInstallationId);
-                    }
-
                     if (dataTypes.contains(RegistrationDataType.OneSignal) && oneSignalUserId != null) {
                         toSend.put("oneSignalUserId", oneSignalUserId);
+                    }
+
+                    if (dataTypes.contains(RegistrationDataType.CustomData) && customData != null) {
+                        Iterator<String> keys = customData.keys();
+                        while(keys.hasNext()) {
+                            String key = keys.next();
+                            toSend.put("customData_" + key, customData.opt(key));
+                        }
                     }
 
                     try {

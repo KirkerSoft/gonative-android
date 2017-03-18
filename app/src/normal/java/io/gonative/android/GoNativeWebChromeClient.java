@@ -4,6 +4,7 @@ import android.annotation.TargetApi;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.net.Uri;
+import android.os.Message;
 import android.view.View;
 import android.view.ViewGroup;
 import android.webkit.GeolocationPermissions;
@@ -40,8 +41,18 @@ class GoNativeWebChromeClient extends WebChromeClient {
     }
 
     @Override
-    public void onGeolocationPermissionsShowPrompt(String origin, GeolocationPermissions.Callback callback) {
-        callback.invoke(origin, AppConfig.getInstance(mainActivity).usesGeolocation, true);
+    public void onGeolocationPermissionsShowPrompt(final String origin, final GeolocationPermissions.Callback callback) {
+        if (!AppConfig.getInstance(mainActivity).usesGeolocation) {
+            callback.invoke(origin, false, false);
+            return;
+        }
+
+        mainActivity.getRuntimeGeolocationPermission(new Runnable() {
+            @Override
+            public void run() {
+                callback.invoke(origin, true, false);
+            }
+        });
     }
 
     @Override
@@ -97,38 +108,35 @@ class GoNativeWebChromeClient extends WebChromeClient {
     // This method was added in Lollipop
     public boolean onShowFileChooser(WebView webView, ValueCallback<Uri[]> filePathCallback, FileChooserParams fileChooserParams) {
         // make sure there is no existing message
-        if (mainActivity.getUploadMessageLP() != null) {
-            mainActivity.getUploadMessageLP().onReceiveValue(null);
-            mainActivity.setUploadMessageLP(null);
+        mainActivity.cancelFileUpload();
+
+        boolean multiple = false;
+        switch (fileChooserParams.getMode()) {
+            case FileChooserParams.MODE_OPEN:
+                multiple = false;
+                break;
+            case FileChooserParams.MODE_OPEN_MULTIPLE:
+                multiple = true;
+                break;
+            case FileChooserParams.MODE_SAVE:
+            default:
+                // MODE_SAVE is unimplemented
+                filePathCallback.onReceiveValue(null);
+                return false;
         }
 
         mainActivity.setUploadMessageLP(filePathCallback);
-
-        Intent intent = urlNavigation.createFileChooserIntent(fileChooserParams.getAcceptTypes());
-        try {
-            mainActivity.startActivityForResult(intent, MainActivity.REQUEST_SELECT_FILE_LOLLIPOP);
-        } catch (ActivityNotFoundException e) {
-            mainActivity.setUploadMessageLP(null);
-            Toast.makeText(mainActivity, R.string.cannot_open_file_chooser, Toast.LENGTH_LONG).show();
-            return false;
-        }
-
-        return true;
+        return urlNavigation.chooseFileUpload(fileChooserParams.getAcceptTypes(), multiple);
     }
 
     // For Android > 4.1
     public void openFileChooser(ValueCallback<Uri> uploadMsg, String acceptType, String capture) {
         // make sure there is no existing message
-        if (mainActivity.getUploadMessage() != null) {
-            mainActivity.getUploadMessage().onReceiveValue(null);
-            mainActivity.setUploadMessage(null);
-        }
+        mainActivity.cancelFileUpload();
 
         mainActivity.setUploadMessage(uploadMsg);
-
         if (acceptType == null) acceptType = "*/*";
-        Intent intent = urlNavigation.createFileChooserIntent(new String[]{acceptType});
-        mainActivity.startActivityForResult(intent, MainActivity.REQUEST_SELECT_FILE_OLD);
+        urlNavigation.chooseFileUpload(new String[]{acceptType});
     }
 
     // Android 3.0 +
@@ -144,5 +152,10 @@ class GoNativeWebChromeClient extends WebChromeClient {
     @Override
     public void onReceivedTitle(WebView view, String title){
         mainActivity.updatePageTitle();
+    }
+
+    @Override
+    public boolean onCreateWindow(WebView view, boolean isDialog, boolean isUserGesture, Message resultMsg) {
+        return urlNavigation.createNewWindow(resultMsg);
     }
 }

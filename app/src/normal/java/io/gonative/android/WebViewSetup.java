@@ -3,7 +3,9 @@ package io.gonative.android;
 import android.annotation.SuppressLint;
 import android.content.Context;
 import android.os.Build;
+import android.os.Message;
 import android.util.Log;
+import android.webkit.CookieManager;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 
@@ -55,6 +57,17 @@ public class WebViewSetup {
         wv.removeJavascriptInterface("gonative_status_checker");
         wv.addJavascriptInterface(activity.getStatusCheckerBridge(), "gonative_status_checker");
 
+        if (activity.getIntent().getBooleanExtra(MainActivity.EXTRA_WEBVIEW_WINDOW_OPEN, false)) {
+            // send to other webview
+            Message resultMsg = ((GoNativeApplication)activity.getApplication()).getWebviewMessage();
+            if (resultMsg != null) {
+                WebView.WebViewTransport transport = (WebView.WebViewTransport)resultMsg.obj;
+                if (transport != null) {
+                    transport.setWebView(wv);
+                    resultMsg.sendToTarget();
+                }
+            }
+        }
     }
 
     @SuppressWarnings("deprecation")
@@ -65,8 +78,9 @@ public class WebViewSetup {
             return;
         }
 
-        LeanWebView wv = (LeanWebView)webview;
+        AppConfig appConfig = AppConfig.getInstance(context);
 
+        LeanWebView wv = (LeanWebView)webview;
         WebSettings webSettings = wv.getSettings();
 
         if (AppConfig.getInstance(context).allowZoom) {
@@ -85,6 +99,7 @@ public class WebViewSetup {
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             webSettings.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
+            CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true);
         }
 
         webSettings.setDomStorageEnabled(true);
@@ -95,9 +110,9 @@ public class WebViewSetup {
 
         webSettings.setSaveFormData(false);
         webSettings.setSavePassword(false);
-        webSettings.setUserAgentString(AppConfig.getInstance(context).userAgent);
-        webSettings.setSupportMultipleWindows(false);
-        webSettings.setGeolocationEnabled(AppConfig.getInstance(context).usesGeolocation);
+        webSettings.setUserAgentString(appConfig.userAgent);
+        webSettings.setSupportMultipleWindows(appConfig.enableWindowOpen);
+        webSettings.setGeolocationEnabled(appConfig.usesGeolocation);
     }
 
     public static void setupWebviewGlobals(Context context) {

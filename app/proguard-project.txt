@@ -61,19 +61,13 @@
 -keep interface android.support.v7.** { *; }
 
 # crosswalk
--keep class org.xwalk.core.** {
-    *;
-}
--keep class org.chromium.** {
-    *;
-}
+-keep class org.xwalk.core.** { *; }
+-keep class org.crosswalk.engine.** { *; }
+-keep class org.chromium.** { *; }
 -keepattributes **
+-dontwarn org.chromium.**
 
 # subclasses like XWalkStatusBridge, XWalkProfileBridge, etc.
 -keepclassmembers class io.gonative.android.WebViewSetup$* {
     <methods>;
 }
-
-# parse.com sdk
--dontwarn com.parse.**
--keep class com.parse.** { *; }

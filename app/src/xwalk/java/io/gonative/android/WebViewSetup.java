@@ -3,6 +3,7 @@ package io.gonative.android;
 import android.content.Context;
 import android.os.Build;
 import android.util.Log;
+import android.webkit.ValueCallback;
 
 import org.xwalk.core.JavascriptInterface;
 import org.xwalk.core.XWalkDownloadListener;
@@ -64,9 +65,12 @@ public class WebViewSetup {
 
         LeanWebView wv = (LeanWebView)webview;
 
-        // we need to tell appconfig what the default crosswalk user agent is. It is not easy to get
-        // outside of actually creating an XWalkView with an activity context.
-        appConfig.setWebviewDefaultUserAgent(wv.getUserAgentString());
+        // we need to tell appconfig what the default crosswalk user agent is. Crosswalk 14 does not
+        // have an API to get it, and rather than use async javascript, fake it here.
+        String userAgent = "Mozilla/5.0 (Linux; Android " + Build.VERSION.RELEASE +
+                "; " + Build.MODEL + " Build/" + Build.DISPLAY +
+                ") AppleWebKit/537.36 (KHTML, like Gecko) Chrome/43.0.2357.130 Crosswalk/14.43.343.24 Mobile Safari/537.36";
+        appConfig.setWebviewDefaultUserAgent(userAgent);
 
         // setupwebview will actually set the user agent for crosswalk. Important to do it there
         // rather than this function so that webview pools will also get the right user agent.
@@ -104,6 +108,14 @@ public class WebViewSetup {
 
         final MainActivity.StatusCheckerBridge statusCheckerBridge = activity.getStatusCheckerBridge();
         wv.addJavascriptInterface(new XWalkStatusBridge(statusCheckerBridge), "gonative_status_checker");
+
+        // pass back to webview that created it
+        if (activity.getIntent().getBooleanExtra(MainActivity.EXTRA_WEBVIEW_WINDOW_OPEN, false)) {
+            ValueCallback callback = ((GoNativeApplication) activity.getApplication()).getWebviewValueCallback();
+            if (callback != null) {
+                ((GoNativeApplication)activity.getApplication()).getWebviewValueCallback().onReceiveValue(wv);
+            }
+        }
     }
 
     public static void setupWebview(GoNativeWebviewInterface webview, Context context) {
@@ -122,9 +134,25 @@ public class WebViewSetup {
             Map<String,Object> installation = Installation.getInfo(context);
             String dist = (String)installation.get("distribution");
             if (dist != null && (dist.equals("debug") || dist.equals("adhoc"))) {
-                XWalkPreferences.setValue(XWalkPreferences.REMOTE_DEBUGGING, true);
+                try {
+                    XWalkPreferences.setValue(XWalkPreferences.REMOTE_DEBUGGING, true);
+                } catch (Exception e) {
+                    Log.e(TAG, "Error setting XWalkPreferences.REMOTE_DEBUGGING", e);
+                }
+
             }
         }
+
+        // Fixes issues with setting alpha != 1.0
+        try {
+            XWalkPreferences.setValue(XWalkPreferences.ANIMATABLE_XWALK_VIEW, true);
+        } catch (Exception e) {
+            Log.e(TAG, "Error setting XWalkPreferences.ANIMATABLE_XWALK_VIEW", e);
+        }
+
+        XWalkPreferences.setValue(XWalkPreferences.SUPPORT_MULTIPLE_WINDOWS,
+                AppConfig.getInstance(context).enableWindowOpen);
+        XWalkPreferences.setValue(XWalkPreferences.JAVASCRIPT_CAN_OPEN_WINDOW, true);
     }
 
     public static void removeCallbacks(LeanWebView webview) {
